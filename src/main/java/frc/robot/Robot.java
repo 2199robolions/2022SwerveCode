@@ -4,6 +4,18 @@ import edu.wpi.first.wpilibj.TimedRobot;
 import edu.wpi.first.wpilibj.smartdashboard.SendableChooser;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 
+//Object Tracking related imports
+import edu.wpi.first.networktables.NetworkTable;
+import edu.wpi.first.networktables.NetworkTableInstance;
+import edu.wpi.first.networktables.NetworkTableEntry;
+
+/*import org.opencv.core.Rect;
+import org.opencv.imgproc.Imgproc;
+
+import edu.wpi.first.cscore.UsbCamera;
+import edu.wpi.first.cameraserver.CameraServer;
+import edu.wpi.first.vision.VisionThread;*/
+
 public class Robot extends TimedRobot {
   // ERROR CODES
   public static final int FAIL = -1;
@@ -21,6 +33,7 @@ public class Robot extends TimedRobot {
   private Climber   climber;
 
   //CONSTANTS
+  //private final int    LED_DELAY           = 15;
   private final double REVERSE_FEEDER_TIME = 0.25;
 
   //VARIABLES
@@ -29,6 +42,7 @@ public class Robot extends TimedRobot {
   private double  rotatePower;
   private double  driveX;
   private double  driveY;
+  private boolean fieldDriveState = false;
   private boolean hoodCalibrated  = false;
   private boolean reverseFeeder   = false;
 
@@ -46,10 +60,9 @@ public class Robot extends TimedRobot {
   }
   private ShooterState shooterState = ShooterState.SHOOTER_OFF_STATE;
 
-
   //Setting Up WheelMode for limelight
 	private Drive.WheelMode wheelMode;
-	private int targetingStatus;
+  private int targetingStatus;
 
 
   /**
@@ -73,6 +86,17 @@ public class Robot extends TimedRobot {
 	private int m_delaySelected;
   private final SendableChooser<String> m_delayChooser = new SendableChooser<>();
 
+  //Vision processing
+  NetworkTable TrackingValues = NetworkTableInstance.getDefault().getTable("TrackingValues");
+
+  private static final int IMG_WIDTH = 640;
+  //private static final int IMG_HEIGHT = 480;
+
+  //private VisionThread visionThread;
+  private double deadZoneCount = 0.00;
+  private double centerX    = 0.00;
+
+
   /**
    * Constructor
    */
@@ -85,7 +109,10 @@ public class Robot extends TimedRobot {
     shooter  = new Shooter();
     climber  = new Climber();
     auto     = new Auto(drive, grabber, shooter);
-    
+
+    //Set Variables
+    //
+
     //Set Different Status Cues
     climberState  = Climber.ClimberState.ALL_ARMS_DOWN;
     wheelMode     = Drive.WheelMode.MANUAL;
@@ -284,37 +311,9 @@ public class Robot extends TimedRobot {
     if (controls.autoKill() == true) {
       autoStatus = Robot.FAIL;
     }
-  
-    drive.circle(3);
-
-    /*switch (step) {
-      case 1:
-        shooter.testHoodMotor(-0.03);
-        if (shooter.getHoodEncoder() < -13) {
-          shooter.disableHoodMotor();
-          autoStatus = DONE;
-        }
-        else {
-          autoStatus = CONT;
-        }
-        break;
-      case 2:
-        shooter.enableShooterFullPower();
-        break;
-      default:
-        step = 1;
-    }
-
-    if ( (autoStatus == Robot.DONE) || (autoStatus == Robot.FAIL) ) {
-      step++;
-    }*/
-  
-    //autoStatus = shooter.moveHoodFullForward();
-    //shooter.testHoodMotorEncoder();
     
-    /*double tempPower;
-    tempPower = SmartDashboard.getNumber("Input Power", 0.5);
-    shooter.enableShooter(tempPower);*/
+    //Uses NetworkTables to get the ball value
+    objectTracking();
   }
 
 
@@ -332,7 +331,6 @@ public class Robot extends TimedRobot {
     driveY                 = controls.getDriveY();
     shootLocation          = controls.getShooterLocation();
     boolean killTargetLock = controls.autoKill();
-    boolean fieldDrive     = controls.getFieldDrive();
   
     //Only turns on targetLock mode if autoKill isn't being pressed
     if (killTargetLock == true) {
@@ -345,7 +343,7 @@ public class Robot extends TimedRobot {
 
       //If robot is out of deadzone, drive normally
       if ((Math.sqrt(driveX*driveX + driveY*driveY) > 0.01) || (Math.abs(rotatePower) > 0.01)) {
-        drive.teleopSwerve(driveX, driveY, rotatePower, fieldDrive);
+        drive.teleopSwerve(driveX, driveY, rotatePower);
       }
       else {
         //Robot is in dead zone
@@ -618,6 +616,100 @@ public class Robot extends TimedRobot {
       
       return;
     }
+  }
+
+  /****************************************************************************************** 
+  *
+  *    objectTracking()
+  *    Targets the yellow balls using contor values
+  *    Can be changed to blob detection if need be, although it less reliable
+  * 
+  ******************************************************************************************/
+  public void objectTracking() {
+    // Variables
+    final int DEAD_ZONE = 25;
+    boolean pipelineEmpty;
+    double  emptyCount;
+    double  drivePower;
+    double  turn;
+
+    //Network Tables
+    NetworkTableEntry isEmpty = TrackingValues.getEntry("IsEmpty");
+    NetworkTableEntry target = TrackingValues.getEntry("CenterX");
+    NetworkTableEntry empty  = TrackingValues.getEntry("Empty");
+
+    //Sets the double variables
+    pipelineEmpty = isEmpty.getBoolean(false);
+    centerX       = target.getDouble(0.00);
+    emptyCount    = empty.getDouble(0.00);
+
+    //Ignores the 50 pixels around the edge
+    if ( (centerX < DEAD_ZONE) || (centerX > IMG_WIDTH - DEAD_ZONE) ) {
+      pipelineEmpty = true;
+      deadZoneCount++;
+    }
+
+    if (pipelineEmpty == true) {
+      //Prints the emptyCount
+      System.out.println("Empty Count: " + emptyCount + " Dead Zone " + deadZoneCount);
+    }
+    else if (pipelineEmpty == false) {
+      //Does the math for tracking the balls
+      turn = centerX - (IMG_WIDTH / 2);
+
+      //Drive Power
+      drivePower = turn * 0.001;
+    
+      
+      //So far it just rotates to look at the ball using a REALLY SLOW speed 
+      drive.teleopRotate(drivePower);
+
+      System.out.println("Turn: " + turn + " CenterX: " + centerX + " drive: " + drivePower);
+
+      //Resets empty counts
+      emptyCount    = 0;
+      deadZoneCount = 0;
+    }
+    else {
+      //Sets the values to 0 if otherwise
+      emptyCount = 0.00;
+      turn       = 0.00;
+      centerX    = 0.00;
+      drivePower = 0.00;
+    }
+
+    /*//Does the math for tracking the balls
+    if (centerX != -1) {
+      turn = centerX - (IMG_WIDTH / 2);
+    
+      //So far it just rotates to look at the ball using a REALLY SLOW speed 
+      //drive.teleopRotate(turn * 0.001);
+
+      System.out.println("Turn: " + turn + " CenterX: " + centerX);
+    }
+
+    //Sets centerX to -1 (should not happen naturally)
+    if (emptyCount != 0) {
+      centerX = -1;
+
+      //Prints the emptyCount
+      System.out.println("Empty Count: " + emptyCount + "\n");
+    }*/
+  }
+
+  /****************************************************************************************** 
+   *
+   *    fieldDrive()
+   *    returns if we are in field drive mode   
+   * 
+   ******************************************************************************************/
+   private boolean fieldDrive() {
+
+    if (controls.toggleFieldDrive() == true) {
+      fieldDriveState = !fieldDriveState; //Toggles fieldDriveState
+    }
+    
+    return fieldDriveState;
   }
 
 } // End of the Robot Class
